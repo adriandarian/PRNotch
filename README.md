@@ -1,54 +1,112 @@
 # PR Notch
 
-PR Notch is a native macOS left-edge companion for pull requests you authored. It keeps a 6-point tab at the physical left edge of the selected display, reveals a compact rail on hover, and opens a detailed PR flyout without requiring GitHub tabs to stay open.
+![PR Notch rail and pull-request detail flyout](assets/readme/pr-notch-hero.png)
 
-## Status colors
+PR Notch is a small native macOS companion for pull requests you authored. It lives at the edge of your display, keeps review work visible without another browser tab, and turns the state of your queue into a compact, glanceable rail.
 
-- Green: GitHub reports the pull request clean and mergeable.
-- Red: one or more required CI checks are failing.
-- Yellow: reviewer feedback, a merge conflict, or an approved branch update needs attention.
-- Blue: CI is running, human review is pending, or another merge gate is still waiting.
+<p align="center"><strong>See what needs your attention. Open the right PR. Keep moving.</strong></p>
 
-Red has the highest priority, followed by yellow, blue, and green. Every flyout starts with one primary status derived from the same state as its rail ring; reviewer activity is shown separately.
+## What it does
 
-## PR relationships
+- Shows a compact left-edge rail for your open, non-draft pull requests.
+- Uses one semantic ring per PR so the most important state is visible at a glance.
+- Opens a focused flyout with review, CI, mergeability, relationships, and branch details.
+- Groups related PRs together while preserving attention and recency order.
+- Watches only the repositories you choose.
+- Keeps the last complete queue visible when GitHub is slow, rate-limited, or temporarily unavailable.
 
-When related pull requests are visible together in the rail, a straight vertical connector spans only the empty gap between their ring edges on the column's center axis. If another ring sits between the endpoints, the connector stops at its outer wall and resumes from the opposite wall. Connectors never enter a ring or branch sideways:
+PR Notch uses the GitHub CLI already installed on your Mac and its authenticated account. Hovering the rail is local UI work; it never makes an API request.
 
-- Solid: one pull request explicitly links to the other. GitHub cross-reference events strengthen a relationship only when both pull requests also share a work-item reference, so incidental timeline mentions cannot merge unrelated ticket groups.
-- Dashed: both pull requests share a Jira-style ticket key or the same linked GitHub issue.
-- Arrow: the source pull request explicitly says it depends on, is blocked by, or is stacked on the pull request at the arrowhead.
+## Status at a glance
 
-Dependency takes precedence over a direct link, and a direct link takes precedence over a shared ticket, so each pair has one unambiguous connector. Hover help identifies the related repository and pull request number.
+The rail shows one primary status per pull request, using the same state that opens in its flyout:
 
-Related pull requests are kept together as one contiguous group. Each group stays anchored at the position of its most urgent member, while members preserve their normal attention and recency order inside the group.
+| Ring | Meaning |
+| --- | --- |
+| **Red** | Required CI checks are failing. |
+| **Yellow** | Reviewer feedback, a merge conflict, or a required branch update needs attention. |
+| **Blue** | CI is running, review is pending, or another merge gate is waiting. |
+| **Green** | GitHub reports the pull request as clean and mergeable. |
 
-## GitHub data
+When more than one condition applies, PR Notch prioritizes red, then yellow, blue, and green. Reviewer activity remains visible as its own detail so a clean merge state is not confused with completed review.
 
-PR Notch uses the locally installed GitHub CLI and its authenticated account. Its queue query requests open, non-draft pull requests authored by `@me`, including review decisions, mergeability, check runs, required checks from branch protection and active repository rulesets, compact review-thread state, PR body and branch references, linked issues, GitHub cross-reference events, and the current GraphQL rate limit. In “Only selected” mode, the repository qualifiers are part of the GitHub request itself; unselected repositories are not scanned and filtered afterward. Discovery and detail batches are committed as one snapshot, so ring colors and flyout facts cannot come from different refresh generations.
+## Related pull requests
+
+PR Notch can connect related work directly in the rail:
+
+- **Solid** — an explicit pull-request link.
+- **Dashed** — a shared Jira-style ticket key or linked GitHub issue.
+- **Arrow** — a dependency such as “blocked by” or “stacked on.”
+
+Connectors stay between ring edges, never through a PR node. Dependency relationships take precedence over direct links, which take precedence over shared-ticket relationships, so each pair has one clear explanation.
+
+## GitHub data and refresh behavior
+
+The refresh pipeline is designed to stay useful under real-world GitHub limits:
+
+- Automatic refresh runs at most once every two minutes.
+- Manual refresh bypasses the cooldown but still respects rate-limit protection.
+- Selected repositories are applied to discovery before PR details are requested.
+- Discovery, review state, CI, mergeability, and relationship data publish as one complete snapshot.
+- Incomplete responses preserve the last complete queue instead of replacing it with partial data.
+- Transient failures retry automatically; authentication errors are not inferred from ordinary network or rate-limit failures.
+- A 60-second overall deadline prevents an endless “Refreshing…” state.
+- Cached repository policy, comments, and queue data survive app restarts.
+
+PR Notch also records its own request count and GraphQL points separately from GitHub’s shared account quota. The rolling ledger is stored at:
+
+```text
+~/Library/Application Support/PRNotch/api-usage.json
+```
+
+## Install and run
+
+Authenticate GitHub once if needed:
 
 ```bash
 gh auth login -h github.com
 ```
 
-The app refreshes the queue automatically at most once every two minutes; manual refresh bypasses that cooldown but still respects rate-limit protection. Hovering never makes an API request. A refresh has a 60-second total deadline, and each GitHub CLI subprocess also has a deadline, so “Refreshing…” cannot remain stuck indefinitely. PR Notch preserves the final 1,000 points of the authenticated account's hourly GraphQL allowance, pauses until GitHub's reported reset time when necessary, and exponentially backs off after failures. Until a live refresh succeeds, the last-known queue remains visible and each flyout reports exactly how long ago it was updated. Transient GitHub failures are retried automatically and never shown as authentication failures. Repository discovery uses a separate REST request and reuses its cache for 24 hours unless refreshed manually.
-
-Automatic refresh combines one paginated search for authored PR IDs with live status for up to 50 cached PRs in one GraphQL request. Selected repositories are applied to discovered IDs before requesting their details; exceptionally large authored queues fall back to repository-qualified searches. New PRs and larger queues use additional bounded batches. Review-thread counts, CI, reviews, mergeability, and relationships remain live on each two-minute cycle. Comment text is cached by thread ID and count, refreshed when the PR changes, and expires after ten minutes. Required-check policies are cached once per repository for one hour. Manual refresh updates these caches immediately. The caches survive app restarts and are scoped to the authenticated account. Closed/draft PRs are removed using current state, and incomplete responses preserve the last complete queue. A timed-out combined query gets one retry using smaller requests; rate-limit failures do not trigger extra retries. Repository-filter edits are debounced into one refresh.
-
-The rail's context menu shows PR Notch's own request count and GraphQL points for the past hour. `~/Library/Application Support/PRNotch/api-usage.json` stores the rolling request ledger, separately from GitHub's shared account quota. Failed requests with unreported GraphQL cost are recorded as unknown; their cost is not assumed to be zero. Repository-discovery pagination counts each successful HTTP page. A failed paginated REST command records at least one attempt because GitHub CLI does not report how many pages completed before failure.
-
-Repository scope is saved both in app preferences and in Application Support so replacing the app—or changing its bundle identifier in a future release—does not reset the watched list. Repository search accepts case-insensitive regular expressions such as `frontend|worker` and performs all matching locally.
-
-## Run
+Build, install, sign, launch, and verify the app:
 
 ```bash
 ./script/build_and_run.sh --verify
 ```
 
-The script builds the Swift package, stages and ad-hoc signs `dist/PRNotch.app`, installs it as `~/Applications/PRNotch.app`, and launches that installed copy through Launch Services. Set `PR_NOTCH_INSTALL_DIR` to use a different install location. Right-click the rail to refresh, copy a compact review request, open settings, or quit.
+By default, the verified app is installed at `~/Applications/PRNotch.app`. Set `PR_NOTCH_INSTALL_DIR` to use another location.
 
-For deterministic visual QA with representative green, blue, yellow, and red PRs:
+For deterministic visual QA with fictional representative PR states:
 
 ```bash
 ./script/build_and_run.sh --qa-expanded
 ```
+
+Right-click the rail to refresh, copy a compact review request, open settings, or quit.
+
+## Repository scope
+
+Repository scope is available from the rail’s context menu and settings. The selected list is persisted in both app preferences and Application Support, so replacing the bundle does not silently reset the repositories you watch. Search supports case-insensitive regular expressions, for example:
+
+```text
+frontend|worker
+```
+
+## Requirements
+
+- macOS 14 or later
+- Swift 6.2 toolchain
+- GitHub CLI (`gh`) with an authenticated GitHub account
+
+## Project shape
+
+This is a native Swift package with no browser runtime:
+
+```text
+Sources/PRNotch/       App, models, services, stores, and SwiftUI views
+Tests/PRNotchTests/    Focused refresh and status tests
+script/                Build, install, launch, and QA helpers
+```
+
+## Visual QA
+
+Repository screenshots must use the app’s fictional preview fixtures. Do not capture live repository names, pull-request numbers, reviewer identities, desktop contents, or display details in project artifacts. See [`design-qa.md`](design-qa.md) for the safe QA workflow and required visual surfaces.
