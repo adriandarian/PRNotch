@@ -27,9 +27,6 @@ struct NotchRailView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
         .contentShape(Rectangle())
-        .onHover { isInside in
-            store.surfaceHoverChanged(.rail, isInside: isInside)
-        }
         .contextMenu {
             Button(store.isRefreshing ? "Refreshing…" : "Refresh Pull Requests") {
                 store.requestRefresh()
@@ -72,6 +69,7 @@ struct NotchRailView: View {
                 .frame(width: NotchLayout.railWidth, height: height)
 
             PullRequestRelationshipOverlay(
+                pullRequests: store.pullRequests,
                 relationships: store.relationships,
                 entryCenters: entryCenters,
                 emphasizedEntryID: store.hoveredEntryID ?? store.selectedEntryID
@@ -189,82 +187,82 @@ private struct PullRequestRailCenterPreferenceKey: PreferenceKey {
 }
 
 private struct PullRequestRelationshipOverlay: View {
+    let pullRequests: [PullRequest]
     let relationships: [PullRequestRelationship]
     let entryCenters: [String: CGFloat]
     let emphasizedEntryID: String?
 
-    private struct VisibleRelationship {
-        let relationship: PullRequestRelationship
-        let sourceY: CGFloat
-        let targetY: CGFloat
-    }
-
     var body: some View {
         Canvas { context, size in
-            for relationship in visibleRelationships(height: size.height) {
-                draw(relationship, in: &context)
+            // Project the graph onto adjacent rail gaps. Each gap has exactly
+            // one style, so a weak link can never be drawn over a solid group.
+            for connection in PullRequestRelationshipOrdering.railConnections(
+                in: pullRequests,
+                relationships: relationships
+            ) {
+                draw(connection, height: size.height, in: &context)
             }
+            drawDependencyArrows(height: size.height, in: &context)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 
-    private func visibleRelationships(height: CGFloat) -> [VisibleRelationship] {
-        relationships.compactMap { relationship -> VisibleRelationship? in
-            guard let sourceY = entryCenters[relationship.sourceID],
-                  let targetY = entryCenters[relationship.targetID],
-                  (0...height).contains(sourceY),
-                  (0...height).contains(targetY) else { return nil }
-            return VisibleRelationship(
-                relationship: relationship,
-                sourceY: sourceY,
-                targetY: targetY
+    private func draw(
+        _ connection: PullRequestRailConnection,
+        height: CGFloat,
+        in context: inout GraphicsContext
+    ) {
+        guard let sourceY = entryCenters[connection.upperID],
+              let targetY = entryCenters[connection.lowerID],
+              targetY >= 0, sourceY <= height else { return }
+        let geometry = NotchLayout.relationshipLineGeometry(
+            sourceY: sourceY,
+            targetY: targetY,
+            kind: connection.isDashed ? .sharedReference : .sameTicket
+        )
+        let isEmphasized = emphasizedEntryID.map(connection.memberIDs.contains) ?? false
+        let color = Color.white.opacity(isEmphasized ? 0.78 : 0.44)
+        let dash: [CGFloat] = connection.isDashed ? [3, 4] : []
+
+        for segment in geometry.segments {
+            var path = Path()
+            path.move(to: CGPoint(x: geometry.axisX, y: min(segment.startY, segment.endY)))
+            path.addLine(to: CGPoint(x: geometry.axisX, y: max(segment.startY, segment.endY)))
+            context.stroke(
+                path,
+                with: .color(color),
+                style: StrokeStyle(
+                    lineWidth: isEmphasized ? 1.25 : 1,
+                    lineCap: .round,
+                    lineJoin: .round,
+                    dash: dash
+                )
             )
-        }
-        .sorted { lhs, rhs in
-            let lhsStart = min(lhs.sourceY, lhs.targetY)
-            let rhsStart = min(rhs.sourceY, rhs.targetY)
-            if lhsStart != rhsStart { return lhsStart < rhsStart }
-            return max(lhs.sourceY, lhs.targetY) < max(rhs.sourceY, rhs.targetY)
         }
     }
 
-    private func draw(_ visible: VisibleRelationship, in context: inout GraphicsContext) {
-        let relationship = visible.relationship
-        let geometry = NotchLayout.relationshipLineGeometry(
-            sourceY: visible.sourceY,
-            targetY: visible.targetY,
-            kind: relationship.kind,
-            intermediateNodeCenters: Array(entryCenters.values)
+    private func drawDependencyArrows(height: CGFloat, in context: inout GraphicsContext) {
+        let order = Dictionary(
+            uniqueKeysWithValues: pullRequests.enumerated().map { ($0.element.id, $0.offset) }
         )
-        let isEmphasized = emphasizedEntryID.map(relationship.involves) ?? false
-        let color = Color.white.opacity(isEmphasized ? 0.78 : 0.44)
-        let dash: [CGFloat] = relationship.kind == .sharedReference ? [2.5, 2.25] : []
-
-        var path = Path()
-        for segment in geometry.segments {
-            path.move(to: CGPoint(x: geometry.axisX, y: segment.startY))
-            path.addLine(to: CGPoint(x: geometry.axisX, y: segment.endY))
+        for relationship in relationships where relationship.kind == .dependency {
+            guard let sourceIndex = order[relationship.sourceID],
+                  let targetIndex = order[relationship.targetID],
+                  let targetY = entryCenters[relationship.targetID],
+                  (0...height).contains(targetY) else { continue }
+            let direction: CGFloat = targetIndex > sourceIndex ? 1 : -1
+            let tipY = targetY - direction * NotchLayout.ringDiameter / 2
+            let baseY = tipY - direction * 4
+            let axisX = NotchLayout.railWidth / 2
+            var arrowhead = Path()
+            arrowhead.move(to: CGPoint(x: axisX, y: tipY))
+            arrowhead.addLine(to: CGPoint(x: axisX - 2.5, y: baseY))
+            arrowhead.addLine(to: CGPoint(x: axisX + 2.5, y: baseY))
+            arrowhead.closeSubpath()
+            let isEmphasized = emphasizedEntryID.map(relationship.involves) ?? false
+            context.fill(arrowhead, with: .color(.white.opacity(isEmphasized ? 0.78 : 0.44)))
         }
-        context.stroke(
-            path,
-            with: .color(color),
-            style: StrokeStyle(
-                lineWidth: isEmphasized ? 1.25 : 1,
-                lineCap: .round,
-                lineJoin: .round,
-                dash: dash
-            )
-        )
-
-        guard let arrowTipY = geometry.arrowTipY,
-              let arrowBaseY = geometry.arrowBaseY else { return }
-        var arrowhead = Path()
-        arrowhead.move(to: CGPoint(x: geometry.axisX, y: arrowTipY))
-        arrowhead.addLine(to: CGPoint(x: geometry.axisX - 2.5, y: arrowBaseY))
-        arrowhead.addLine(to: CGPoint(x: geometry.axisX + 2.5, y: arrowBaseY))
-        arrowhead.closeSubpath()
-        context.fill(arrowhead, with: .color(color))
     }
 }
 

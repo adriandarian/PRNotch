@@ -2,14 +2,16 @@ import Foundation
 
 enum PullRequestRelationshipKind: String, Codable, Equatable, Sendable {
     case sharedReference
+    case sameTicket
     case directLink
     case dependency
 
     var priority: Int {
         switch self {
         case .sharedReference: 0
-        case .directLink: 1
-        case .dependency: 2
+        case .sameTicket: 1
+        case .directLink: 2
+        case .dependency: 3
         }
     }
 }
@@ -57,6 +59,9 @@ enum PullRequestRelationshipDetector {
                 ($0.id, references(in: $0, trustedTicketPrefixes: trustedPrefixes))
             }
         )
+        let primaryTicketReferences = Dictionary(uniqueKeysWithValues: pullRequests.map {
+            ($0.id, primaryReferences(in: $0, trustedTicketPrefixes: trustedPrefixes))
+        })
 
         for source in pullRequests {
             for target in pullRequests where source.id != target.id {
@@ -64,13 +69,13 @@ enum PullRequestRelationshipDetector {
                 let hasGitHubCrossReference = source.crossReferencedPullRequests?.contains {
                     $0.url.absoluteString.caseInsensitiveCompare(target.url.absoluteString) == .orderedSame
                 } ?? false
-                let hasSharedReference = !(ticketReferences[source.id] ?? Set<String>())
-                    .intersection(ticketReferences[target.id] ?? Set<String>())
+                let hasSharedPrimaryReference = !(primaryTicketReferences[source.id] ?? Set<String>())
+                    .intersection(primaryTicketReferences[target.id] ?? Set<String>())
                     .isEmpty
                 // A timeline cross-reference can be caused by incidental discussion in an
                 // otherwise unrelated PR. Let it strengthen a shared work-item relationship,
                 // but never let that event alone merge separate ticket families into one rail.
-                let hasCorroboratedGitHubCrossReference = hasGitHubCrossReference && hasSharedReference
+                let hasCorroboratedGitHubCrossReference = hasGitHubCrossReference && hasSharedPrimaryReference
                 guard !referenceRanges.isEmpty || hasCorroboratedGitHubCrossReference else { continue }
 
                 let kind: PullRequestRelationshipKind = referenceRanges.contains { referenceRange in
@@ -92,16 +97,19 @@ enum PullRequestRelationshipDetector {
             for secondIndex in pullRequests.indices where secondIndex > firstIndex {
                 let first = pullRequests[firstIndex]
                 let second = pullRequests[secondIndex]
+                let sharedPrimary = (primaryTicketReferences[first.id] ?? Set<String>())
+                    .intersection(primaryTicketReferences[second.id] ?? Set<String>())
+                    .sorted()
                 let shared = (ticketReferences[first.id] ?? Set<String>())
                     .intersection(ticketReferences[second.id] ?? Set<String>())
                     .sorted()
-                guard let reference = shared.first else { continue }
+                guard let reference = sharedPrimary.first ?? shared.first else { continue }
 
                 merge(
                     PullRequestRelationship(
                         sourceID: first.id,
                         targetID: second.id,
-                        kind: .sharedReference,
+                        kind: sharedPrimary.isEmpty ? .sharedReference : .sameTicket,
                         reference: reference
                     ),
                     into: &relationshipsByPair
@@ -221,6 +229,31 @@ enum PullRequestRelationshipDetector {
         return references
     }
 
+    private static func primaryReferences(
+        in pullRequest: PullRequest,
+        trustedTicketPrefixes: Set<String>
+    ) -> Set<String> {
+        var primary = Set((pullRequest.closingIssueReferences ?? []).map(\.canonicalID))
+        let titleAndBranch = [pullRequest.title, pullRequest.headRefName ?? ""].joined(separator: "\n")
+        let canonical = captureGroupMatches(
+            pattern: #"(?i)(?<![A-Za-z0-9])([A-Z][A-Z0-9]{1,15}-\d+)(?![A-Za-z0-9]|\.\d)"#,
+            in: titleAndBranch
+        ).map { $0.uppercased() }.filter {
+            ticketPrefix($0).map(trustedTicketPrefixes.contains) ?? false
+        }
+        primary.formUnion(canonical)
+
+        // A labeled body ticket is a fallback when the PR has no canonical
+        // work item. Background mentions must not merge distinct ticket groups.
+        if primary.isEmpty, let body = pullRequest.bodyText {
+            primary.formUnion(captureGroupMatches(
+                pattern: #"(?im)^\s*(?:ticket|jira|fix(?:e[sd])?|close[sd]?)\s*:?\s*([A-Z][A-Z0-9]{1,15}-\d+)(?![A-Za-z0-9]|\.\d)"#,
+                in: body
+            ).map { $0.uppercased() })
+        }
+        return primary
+    }
+
     private static func ticketPrefix(_ reference: String) -> String? {
         reference.split(separator: "-", maxSplits: 1).first.map {
             String($0).uppercased()
@@ -256,7 +289,50 @@ enum PullRequestRelationshipOrdering {
         _ pullRequests: [PullRequest],
         relationships: [PullRequestRelationship]
     ) -> [PullRequest] {
-        guard pullRequests.count > 1, !relationships.isEmpty else { return pullRequests }
+        // Keep the solid groups intact before gathering groups joined by weak
+        // references. Both levels retain the incoming attention order.
+        let solidOrder = components(
+            pullRequests,
+            relationships: relationships.filter { $0.kind != .sharedReference }
+        ).flatMap { $0 }
+        return components(solidOrder, relationships: relationships).flatMap { $0 }
+    }
+
+    static func railConnections(
+        in orderedPullRequests: [PullRequest],
+        relationships: [PullRequestRelationship]
+    ) -> [PullRequestRailConnection] {
+        let solidGroups = components(
+            orderedPullRequests,
+            relationships: relationships.filter { $0.kind != .sharedReference }
+        )
+        let relatedGroups = components(orderedPullRequests, relationships: relationships)
+        let solidGroupByID = groupIndices(solidGroups)
+        let relatedGroupByID = groupIndices(relatedGroups)
+
+        return zip(orderedPullRequests, orderedPullRequests.dropFirst()).compactMap { upper, lower in
+            guard relatedGroupByID[upper.id] == relatedGroupByID[lower.id],
+                  let upperGroup = solidGroupByID[upper.id],
+                  let lowerGroup = solidGroupByID[lower.id] else { return nil }
+            return PullRequestRailConnection(
+                upperID: upper.id,
+                lowerID: lower.id,
+                isDashed: upperGroup != lowerGroup,
+                memberIDs: Set((solidGroups[upperGroup] + solidGroups[lowerGroup]).map(\.id))
+            )
+        }
+    }
+
+    private static func groupIndices(_ groups: [[PullRequest]]) -> [String: Int] {
+        Dictionary(uniqueKeysWithValues: groups.enumerated().flatMap { index, members in
+            members.map { ($0.id, index) }
+        })
+    }
+
+    private static func components(
+        _ pullRequests: [PullRequest],
+        relationships: [PullRequestRelationship]
+    ) -> [[PullRequest]] {
 
         let visibleIDs = Set(pullRequests.map(\.id))
         var adjacency: [String: Set<String>] = [:]
@@ -267,7 +343,7 @@ enum PullRequestRelationshipOrdering {
         }
 
         var emitted = Set<String>()
-        var result: [PullRequest] = []
+        var result: [[PullRequest]] = []
         result.reserveCapacity(pullRequests.count)
 
         for pullRequest in pullRequests where !emitted.contains(pullRequest.id) {
@@ -281,12 +357,18 @@ enum PullRequestRelationshipOrdering {
                 }
             }
 
-            for member in pullRequests where componentIDs.contains(member.id) {
-                guard emitted.insert(member.id).inserted else { continue }
-                result.append(member)
-            }
+            let members = pullRequests.filter { componentIDs.contains($0.id) }
+            emitted.formUnion(componentIDs)
+            result.append(members)
         }
 
         return result
     }
+}
+
+struct PullRequestRailConnection: Equatable {
+    let upperID: String
+    let lowerID: String
+    let isDashed: Bool
+    let memberIDs: Set<String>
 }

@@ -16,9 +16,6 @@ struct PullRequestDetailView: View {
         }
         .frame(width: selectedDetailSize.width, height: selectedDetailSize.height)
         .contentShape(LiquidDetailShape(pointerCenter: store.detailPointerCenter))
-        .onHover { isInside in
-            store.surfaceHoverChanged(.detail, isInside: isInside)
-        }
         .onExitCommand {
             store.collapse()
         }

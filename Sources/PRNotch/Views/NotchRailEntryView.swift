@@ -18,8 +18,12 @@ struct NotchRailEntryView: View {
 
     var body: some View {
         Button {
-            withAnimation(animation) {
-                store.activateEntry(id: entry.id, centerFromTop: centerFromTop)
+            if let pullRequest = entry.pullRequest {
+                AppActions.open(pullRequest.url)
+            } else {
+                withAnimation(animation) {
+                    store.activateEntry(id: entry.id, centerFromTop: centerFromTop)
+                }
             }
         } label: {
             ZStack {
@@ -67,7 +71,7 @@ struct NotchRailEntryView: View {
             }
         }
         .accessibilityLabel(helpText)
-        .accessibilityHint(isSelected ? "Collapses details" : "Shows pull request details")
+        .accessibilityHint(entry.pullRequest == nil ? "Shows details" : "Opens pull request on GitHub")
     }
 
     @ViewBuilder

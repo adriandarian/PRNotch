@@ -122,8 +122,10 @@ final class PullRequestStore: ObservableObject {
             } ?? "another visible pull request"
 
             switch relationship.kind {
+            case .sameTicket:
+                return "Same ticket \(relationship.reference) as \(otherLabel)"
             case .sharedReference:
-                return "Shares \(relationship.reference) with \(otherLabel)"
+                return "Shared reference \(relationship.reference) with \(otherLabel)"
             case .directLink:
                 return relationship.sourceID == pullRequestID
                     ? "Links to \(otherLabel)"
@@ -275,6 +277,7 @@ final class PullRequestStore: ObservableObject {
     func previewEntry(id: String?, centerFromTop: CGFloat? = nil) {
         guard let id,
               railEntries.contains(where: { $0.id == id }) else { return }
+        collapseTask?.cancel()
         revealRail()
         hoveredEntryID = id
         selectedEntryCenterFromTop = centerFromTop
@@ -295,10 +298,10 @@ final class PullRequestStore: ObservableObject {
     }
 
     func endPreview(id: String) {
-        if hoveredEntryID == id {
-            hoveredEntryID = nil
-        }
+        guard hoveredEntryID == id else { return }
+        hoveredEntryID = nil
         previewTask?.cancel()
+        scheduleAutoCollapseIfNeeded()
     }
 
     func surfaceHoverChanged(_ surface: NotchSurface, isInside: Bool) {

@@ -15,13 +15,13 @@ final class PRNotchPanelController: NSObject {
     private var currentDisplayID: CGDirectDisplayID?
     private var isSurfaceVisible = false
     private var transitionToken = 0
+    private var surfaceRecoveryTask: Task<Void, Never>?
 
     private var isVisualQAMode: Bool {
         ProcessInfo.processInfo.arguments.contains("--qa-expanded")
     }
 
-    override init() {
-        let store = PullRequestStore()
+    init(store: PullRequestStore = PullRequestStore()) {
         let railPanel = Self.makePanel(
             size: NotchLayout.railPanelSize(entryCount: 1),
             hasShadow: false
@@ -46,6 +46,13 @@ final class PRNotchPanelController: NSObject {
         detailPanel.contentView = detailHostingView
         detailPanel.alphaValue = 0
 
+        railHostingView.onSurfaceHoverChange = { [weak store] isInside in
+            store?.surfaceHoverChanged(.rail, isInside: isInside)
+        }
+        detailHostingView.onSurfaceHoverChange = { [weak store] isInside in
+            store?.surfaceHoverChanged(.detail, isInside: isInside)
+        }
+
         store.onPresentationChange = { [weak self] animated in
             self?.refreshDetail(animated: animated)
         }
@@ -68,6 +75,14 @@ final class PRNotchPanelController: NSObject {
             name: NSWorkspace.activeSpaceDidChangeNotification,
             object: nil
         )
+        for notification in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self,
+                selector: #selector(activeSpaceDidChange),
+                name: notification,
+                object: nil
+            )
+        }
     }
 
     deinit {
@@ -81,6 +96,7 @@ final class PRNotchPanelController: NSObject {
         railPanel.setFrame(railPresentationFrame(on: screen), display: true)
         railPanel.orderFrontRegardless()
         refreshDetail(animated: false)
+        railHostingView.refreshMousePresence(force: true)
     }
 
     func scheduleInitialShow() {
@@ -91,6 +107,7 @@ final class PRNotchPanelController: NSObject {
     }
 
     func prepareForTermination() {
+        surfaceRecoveryTask?.cancel()
         store.stopSync()
     }
 
@@ -180,10 +197,13 @@ final class PRNotchPanelController: NSObject {
         if !detailPanel.isVisible || detailPanel.alphaValue < 0.01 {
             detailPanel.setFrame(targetFrame, display: false)
             detailPanel.alphaValue = 0
-            orderDetailFront()
         } else if detailPanel.frame != targetFrame {
             detailPanel.setFrame(targetFrame, display: false)
         }
+
+        // isVisible can still be true when the window is on another Space or
+        // behind another surface. Every presentation must restore its order.
+        orderDetailFront()
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.34
@@ -269,10 +289,26 @@ final class PRNotchPanelController: NSObject {
     @objc
     private func activeSpaceDidChange() {
         guard isSurfaceVisible else { return }
-        railPanel.orderFrontRegardless()
-        if store.isExpanded {
-            orderDetailFront()
+        surfaceRecoveryTask?.cancel()
+        // Hover exits are not guaranteed during a Space transition. Clear the
+        // old desktop's selection/tasks before restoring the peek surface.
+        store.concealRail(animated: false)
+        restoreSurface()
+        surfaceRecoveryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            // WindowServer can finish moving Spaces after the notification.
+            self.restoreSurface()
         }
+    }
+
+    private func restoreSurface() {
+        refreshLayout(animated: false)
+        railPanel.orderFrontRegardless()
+        railHostingView.updateTrackingAreas()
+        detailHostingView.updateTrackingAreas()
+        railHostingView.refreshMousePresence(force: true)
+        detailHostingView.refreshMousePresence(force: true)
     }
 
     private func orderDetailFront() {

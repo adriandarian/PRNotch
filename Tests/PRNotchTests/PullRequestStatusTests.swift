@@ -45,7 +45,7 @@ final class PullRequestStatusTests: XCTestCase {
 
         XCTAssertEqual(
             Set(store.relationships.map(\.kind)),
-            Set([.directLink, .sharedReference, .dependency])
+            Set([.directLink, .sameTicket, .dependency])
         )
 
         guard let entry = store.railEntries.first else {
@@ -816,7 +816,7 @@ final class PullRequestStatusTests: XCTestCase {
         let relationships = PullRequestRelationshipDetector.relationships(in: [first, second])
 
         XCTAssertEqual(relationships.count, 1)
-        XCTAssertEqual(relationships[0].kind, .sharedReference)
+        XCTAssertEqual(relationships[0].kind, .sameTicket)
         XCTAssertEqual(relationships[0].reference, "DEMO-123")
     }
 
